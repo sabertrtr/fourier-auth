@@ -1,0 +1,24 @@
+name: fourier-auth
+services:
+  auth:
+    build: .
+    container_name: fourier-auth
+    restart: unless-stopped
+    environment:
+      - SYNAPSE_URL=http://synapse:8008
+      - REDIS_URL=redis://fourier-redis:6379
+      - PORT=8010
+      - SESSION_TTL=86400
+    networks:
+      - synapse_default
+      - danbooru_default
+      - fourier-redis_net
+    # No host port published — Danbooru's nginx reaches it internally as
+    # http://fourier-auth:8010 over danbooru_default.
+networks:
+  synapse_default:
+    external: true
+  danbooru_default:
+    external: true
+  fourier-redis_net:
+    external: true

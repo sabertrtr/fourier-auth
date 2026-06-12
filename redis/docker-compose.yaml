@@ -7,8 +7,6 @@ services:
     # Ephemeral session store: no disk persistence. A restart clears sessions
     # (users simply re-login). --save "" disables RDB snapshots; --appendonly no
     # disables the AOF log.
-    ports:
-      - "127.0.0.1:6379:6379"   # loopback-only, for host-based dev; harmless in prod
     command: redis-server --save "" --appendonly no --maxmemory 256mb --maxmemory-policy allkeys-lru
     networks:
       - fourier-redis_net
