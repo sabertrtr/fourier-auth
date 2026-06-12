@@ -2,8 +2,8 @@
 
 **Project:** Fourier · **Component:** Auth (platform-gated media auth & token broker)
 **Location:** /opt/fourier/auth/
-**Status:** Core service built and proven end to end on the host. Not yet containerized;
-Danbooru integration not yet wired.
+**Status:** Core service built, containerized, and proven end to end (host and
+container-to-container). Danbooru integration not yet wired.
 
 ---
 
@@ -93,7 +93,8 @@ replaced by an SSO/OIDC provider before opening to general users.
 
 ## 6. What was proven (host testing)
 
-All tested on the host against the live Synapse and fourier-redis:
+Tested on the host AND container-to-container (from inside a Danbooru container,
+the path the integration will use) against the live Synapse and fourier-redis:
 
 - Valid login -> session -> thumbnail fetch: 200, correct JPEG.
 - Valid session -> full image fetch: 200.
@@ -108,6 +109,20 @@ All tested on the host against the live Synapse and fourier-redis:
 
 ---
 
+## 6b. Containerization
+
+- Image: node:22-slim, production deps only. Container name `fourier-auth`.
+- Joins three external networks: synapse_default (reach Synapse), danbooru_default
+  (reached BY Danbooru's nginx as http://fourier-auth:8010), fourier-redis_net (reach Redis).
+- Config via environment: SYNAPSE_URL=http://synapse:8008, REDIS_URL=redis://fourier-redis:6379,
+  PORT=8010, SESSION_TTL=86400. No host port published.
+- fourier-redis loopback port (127.0.0.1:6379) removed now that auth reaches Redis over the
+  internal network. Redis is fully internal, no host exposure.
+- Proven container-to-container from inside danbooru-danbooru-1: health (redis:true), login,
+  and gated thumbnail fetch all 200 over the Docker network.
+
+---
+
 ## 7. Deferred / what's next
 
 1. Wire Danbooru's image URLs to the gate (Step 5). The remaining integration. Requires
@@ -115,16 +130,12 @@ All tested on the host against the live Synapse and fourier-redis:
    /images/) routes through fourier-auth instead, and rewriting how Danbooru renders image
    URLs to point at the gate keyed by MXC. Most invasive part — modifies third-party
    software, not Fourier's own code.
-2. Containerize fourier-auth. Dockerfile (Node 22) + compose, joining Synapse's network
-   and fourier-redis_net. Same arc as bmb. Currently runs only on the host.
-3. Device cleanup on logout/expiry. Every login creates a new Matrix device. Logout (and
+2. Device cleanup on logout/expiry. Every login creates a new Matrix device. Logout (and
    ideally session expiry) should call Synapse logout to invalidate that device/token, or
    the user's device list accumulates "Fourier" entries indefinitely.
-4. Remove the loopback Redis port once auth is containerized and reaches Redis over the
-   internal network.
-5. SSO/OIDC provider. Replaces password-grant for general users; slots in behind the
+3. SSO/OIDC provider. Replaces password-grant for general users; slots in behind the
    existing provider seam without touching session/gate code.
-6. Map post -> MXC at request time. The gate currently takes server/mediaId directly; the
+4. Map post -> MXC at request time. The gate currently takes server/mediaId directly; the
    Danbooru integration needs to resolve a booru post to its MXC and produce gate URLs.
 
 ---
