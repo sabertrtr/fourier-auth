@@ -105,6 +105,13 @@ to general users.
 
 ---
 
+## Credits
+
+Code written by Claude (Anthropic). The human counterpart paid the electric bill and
+asked the right questions.
+
+---
+
 ## License
 
 Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0). See LICENSE.
