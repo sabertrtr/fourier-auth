@@ -1,7 +1,7 @@
 # Fourier — Auth (Matrix-Gated Media Proxy) Dev Log
 
 **Project:** Fourier · **Component:** Auth (platform-gated media auth & token broker)
-**Location:** `/opt/fourier/auth/`
+**Location:** /opt/fourier/auth/
 **Status:** Core service built and proven end to end on the host. Not yet containerized;
 Danbooru integration not yet wired.
 
@@ -11,11 +11,11 @@ Danbooru integration not yet wired.
 
 fourier-auth gates access to media so that only users who can prove a valid Matrix
 identity — and who have permission in Matrix to see a given image — can retrieve it. It
-exists to close the gap that the booru currently serves media openly (`/data/` static
+exists to close the gap that the booru currently serves media openly (/data/ static
 files, no auth).
 
-The design principle driving it: **Danbooru stores metadata and a pointer (the MXC URI),
-not the media bytes.** All image bytes live in Synapse's R2 and are served through this
+The design principle driving it: Danbooru stores metadata and a pointer (the MXC URI),
+not the media bytes. All image bytes live in Synapse's R2 and are served through this
 auth proxy, which enforces the viewer's Matrix permissions on every request. Synapse
 remains the single authority for both storage and authorization.
 
@@ -29,16 +29,16 @@ fourier-redis, then calls the Synapse authenticated media API with that token. S
 enforces that the token is valid AND the user shares the room the media is in, returning
 the image bytes (streamed back) or 401/403 if not permitted.
 
-Key property: the Matrix token is **never** exposed to the browser. The browser only ever
+Key property: the Matrix token is never exposed to the browser. The browser only ever
 holds an opaque session id (cookie); the token lives server-side in Redis.
 
 ### Provider seam (future-proofing)
 
-Login is structured behind a **provider interface** (providers.js). A provider
-authenticates a user and yields { matrixUserId, matrixToken }. Matrix (password grant)
-is the first and currently only provider. Future providers (SSO/OIDC, other platforms)
-implement the same shape, so the session and gate layers never need to know which provider
-was used. This keeps the architecture dynamic for Fourier's planned multi-platform growth.
+Login is structured behind a provider interface (providers.js). A provider authenticates
+a user and yields { matrixUserId, matrixToken }. Matrix (password grant) is the first and
+currently only provider. Future providers (SSO/OIDC, other platforms) implement the same
+shape, so the session and gate layers never need to know which provider was used. This
+keeps the architecture dynamic for Fourier's planned multi-platform growth.
 
 ---
 
@@ -85,9 +85,9 @@ All under /opt/fourier/auth/:
   cookie is set.
 - On failure: Synapse's error is passed through as 401.
 
-**Acknowledged limitation:** the user types their Matrix password into a Fourier form,
-which means Fourier sees it in transit (not stored). Acceptable for trusted/admin users;
-to be replaced by an SSO/OIDC provider before opening to general users.
+Acknowledged limitation: the user types their Matrix password into a Fourier form, which
+means Fourier sees it in transit (not stored). Acceptable for trusted/admin users; to be
+replaced by an SSO/OIDC provider before opening to general users.
 
 ---
 
