@@ -12,6 +12,11 @@ const SYNAPSE_URL = process.env.SYNAPSE_URL || "http://synapse:8008";
 const PORT = process.env.PORT || 8010;
 const COOKIE_NAME = "fourier_session";
 
+// Thumbnail sizes the gate will request from Synapse. Requested ?w=/?h=
+// values are snapped to the nearest entry so callers can't induce
+// arbitrary-size thumbnail generation.
+const ALLOWED_THUMB_SIZES = [180, 320, 360, 720, 850];
+
 // Health check (also verifies Redis connectivity)
 app.get("/healthz", async (req, res) => {
   let redisOk = false;
@@ -48,9 +53,18 @@ app.post("/logout", async (req, res) => {
 });
 
 // Media proxy: resolves the caller's session -> Matrix token, streams from Synapse.
+// Thumbnails: ?w=<px>&h=<px> (snapped to ALLOWED_THUMB_SIZES), or legacy ?thumb=1 (320).
 app.get("/media/:serverName/:mediaId", async (req, res) => {
   const { serverName, mediaId } = req.params;
-  const wantThumb = req.query.thumb === "1";
+
+  let thumbSize = null;
+  if (req.query.w || req.query.h) {
+    const want = parseInt(req.query.w || req.query.h, 10) || 320;
+    thumbSize = ALLOWED_THUMB_SIZES.reduce((a, b) =>
+      Math.abs(b - want) < Math.abs(a - want) ? b : a);
+  } else if (req.query.thumb === "1") {
+    thumbSize = 320;
+  }
 
   const session = await getSession(req.cookies[COOKIE_NAME]);
   if (!session) {
@@ -59,8 +73,8 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
   const token = session.matrixToken;
 
   const base = `${SYNAPSE_URL}/_matrix/client/v1/media`;
-  const url = wantThumb
-    ? `${base}/thumbnail/${serverName}/${mediaId}?width=320&height=320&method=scale`
+  const url = thumbSize
+    ? `${base}/thumbnail/${serverName}/${mediaId}?width=${thumbSize}&height=${thumbSize}&method=scale`
     : `${base}/download/${serverName}/${mediaId}`;
 
   try {
