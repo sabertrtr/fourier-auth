@@ -1,29 +1,21 @@
 const axios = require("axios");
+const crypto = require("crypto");
 
 const SYNAPSE_URL = process.env.SYNAPSE_URL || "http://synapse:8008";
 
-// --- Provider interface ---------------------------------------------------
-// A provider authenticates a user and yields { matrixUserId, matrixToken }.
-// Future providers (SSO/OIDC, other platforms) implement the same shape so the
-// session/gate layers never need to know which provider was used.
-//
-//   async login(credentials) -> { matrixUserId, matrixToken, deviceId }
-//   (throws on failure)
-// --------------------------------------------------------------------------
+const OIDC_ISSUER = process.env.OIDC_ISSUER || "https://auth.41chan.net/";
+const OIDC_CLIENT_ID = process.env.OIDC_CLIENT_ID;
+const OIDC_CLIENT_SECRET = process.env.OIDC_CLIENT_SECRET;
+const OIDC_REDIRECT_URI = process.env.OIDC_REDIRECT_URI;
 
-// MatrixProvider: direct password grant (m.login.password).
-// NOTE: this collects the user's Matrix password via Fourier. Acceptable for
-// trusted/admin users; to be superseded by an SSO provider for public users.
 const MatrixProvider = {
   name: "matrix",
-
   async login({ username, password }) {
     if (!username || !password) {
       const e = new Error("username and password required");
       e.status = 400;
       throw e;
     }
-
     let resp;
     try {
       resp = await axios.post(
@@ -41,15 +33,11 @@ const MatrixProvider = {
       e.status = 502;
       throw e;
     }
-
     if (resp.status !== 200) {
-      const e = new Error(
-        (resp.data && resp.data.error) || "login failed"
-      );
+      const e = new Error((resp.data && resp.data.error) || "login failed");
       e.status = 401;
       throw e;
     }
-
     return {
       matrixUserId: resp.data.user_id,
       matrixToken: resp.data.access_token,
@@ -58,13 +46,101 @@ const MatrixProvider = {
   },
 };
 
-// Registry of available providers, keyed by name.
+let _discovery = null;
+async function discover() {
+  if (_discovery) return _discovery;
+  const url = OIDC_ISSUER.replace(/\/$/, "") + "/.well-known/openid-configuration";
+  const resp = await axios.get(url, { validateStatus: () => true });
+  if (resp.status !== 200) {
+    const e = new Error("OIDC discovery failed");
+    e.status = 502;
+    throw e;
+  }
+  _discovery = resp.data;
+  return _discovery;
+}
+
+function base64url(buf) {
+  return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+const OidcProvider = {
+  name: "oidc",
+
+  async authUrl() {
+    const disc = await discover();
+    const state = base64url(crypto.randomBytes(24));
+    const codeVerifier = base64url(crypto.randomBytes(32));
+    const codeChallenge = base64url(
+      crypto.createHash("sha256").update(codeVerifier).digest()
+    );
+    const params = new URLSearchParams({
+      response_type: "code",
+      client_id: OIDC_CLIENT_ID,
+      redirect_uri: OIDC_REDIRECT_URI,
+      scope: "openid urn:matrix:org.matrix.msc2967.client:api:*",
+      state,
+      code_challenge: codeChallenge,
+      code_challenge_method: "S256",
+    });
+    return {
+      url: `${disc.authorization_endpoint}?${params.toString()}`,
+      state,
+      codeVerifier,
+    };
+  },
+
+  async exchange({ code, codeVerifier }) {
+    const disc = await discover();
+    const body = new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: OIDC_REDIRECT_URI,
+      client_id: OIDC_CLIENT_ID,
+      client_secret: OIDC_CLIENT_SECRET,
+      code_verifier: codeVerifier,
+    });
+    const tokResp = await axios.post(disc.token_endpoint, body.toString(), {
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      validateStatus: () => true,
+    });
+    if (tokResp.status !== 200) {
+      const e = new Error(
+        (tokResp.data && (tokResp.data.error_description || tokResp.data.error)) ||
+          "token exchange failed"
+      );
+      e.status = 401;
+      throw e;
+    }
+    const matrixToken = tokResp.data.access_token;
+
+    const who = await axios.get(
+      `${SYNAPSE_URL}/_matrix/client/v3/account/whoami`,
+      {
+        headers: { Authorization: `Bearer ${matrixToken}` },
+        validateStatus: () => true,
+      }
+    );
+    if (who.status !== 200) {
+      const e = new Error("could not resolve Matrix identity from token");
+      e.status = 401;
+      throw e;
+    }
+    return {
+      matrixUserId: who.data.user_id,
+      matrixToken,
+      deviceId: who.data.device_id,
+    };
+  },
+};
+
 const providers = {
   matrix: MatrixProvider,
+  oidc: OidcProvider,
 };
 
 function getProvider(name) {
   return providers[name] || null;
 }
 
-module.exports = { getProvider, providers };
+module.exports = { getProvider, providers, OidcProvider };

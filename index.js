@@ -1,7 +1,8 @@
 const express = require("express");
 const axios = require("axios");
 const cookieParser = require("cookie-parser");
-const { createSession, getSession, destroySession, redisPing } = require("./session");
+const { createSession, getSession, destroySession, redisPing,
+        putOidcState, takeOidcState } = require("./session");
 const { getProvider } = require("./providers");
 
 const app = express();
@@ -11,6 +12,7 @@ app.use(express.json());
 const SYNAPSE_URL = process.env.SYNAPSE_URL || "http://synapse:8008";
 const PORT = process.env.PORT || 8010;
 const COOKIE_NAME = "fourier_session";
+const POST_LOGIN_REDIRECT = process.env.POST_LOGIN_REDIRECT || "https://booru.41chan.net/";
 
 // Thumbnail sizes the gate will request from Synapse. Requested ?w=/?h=
 // values are snapped to the nearest entry so callers can't induce
@@ -24,22 +26,41 @@ app.get("/healthz", async (req, res) => {
   res.json({ status: "ok", service: "fourier-auth", redis: redisOk });
 });
 
-// Login: authenticate via a provider, mint a session.
-// Body: { provider?: "matrix", username, password }
-app.post("/login", async (req, res) => {
-  const { provider: providerName = "matrix", ...credentials } = req.body || {};
-  const provider = getProvider(providerName);
-  if (!provider) {
-    return res.status(400).json({ error: `unknown provider: ${providerName}` });
+// Login: begin the OIDC Authorization Code flow. Redirects the browser to
+// MAS. State + PKCE verifier are stashed in Redis (single-use, short TTL).
+app.get("/login", async (req, res) => {
+  const provider = getProvider("oidc");
+  try {
+    const { url, state, codeVerifier } = await provider.authUrl();
+    await putOidcState(state, { codeVerifier });
+    res.redirect(url);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// OIDC redirect target: MAS sends the user back here with code + state.
+app.get("/callback", async (req, res) => {
+  const { code, state } = req.query;
+  if (!code || !state) {
+    return res.status(400).json({ error: "missing code or state" });
+  }
+  const stored = await takeOidcState(state);
+  if (!stored) {
+    return res.status(400).json({ error: "unknown or expired state" });
   }
   try {
-    const identity = await provider.login(credentials);
+    const provider = getProvider("oidc");
+    const identity = await provider.exchange({
+      code,
+      codeVerifier: stored.codeVerifier,
+    });
     const sid = await createSession({
       matrixUserId: identity.matrixUserId,
       matrixToken: identity.matrixToken,
     });
     res.cookie(COOKIE_NAME, sid, { httpOnly: true, sameSite: "lax" });
-    res.json({ ok: true, user: identity.matrixUserId });
+    res.redirect(POST_LOGIN_REDIRECT);
   } catch (err) {
     res.status(err.status || 500).json({ error: err.message });
   }

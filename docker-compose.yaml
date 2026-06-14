@@ -9,6 +9,11 @@ services:
       - REDIS_URL=redis://fourier-redis:6379
       - PORT=8010
       - SESSION_TTL=86400
+      - OIDC_ISSUER=https://auth.41chan.net/
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID}
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
+      - OIDC_REDIRECT_URI=https://booru.41chan.net/fourier/callback
+      - POST_LOGIN_REDIRECT=https://booru.41chan.net/
     networks:
       - synapse_default
       - danbooru_default
