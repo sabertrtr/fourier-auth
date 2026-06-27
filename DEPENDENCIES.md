@@ -101,7 +101,9 @@ Last verified: 2026-06-14.
   bcrypt until all active users have logged in post-migration.
 - **Token model:** a MAS-issued OAuth access token is also a valid Matrix token
   (MSC3861). fourier-auth's OIDC client relies on this — the token from the code
-  exchange is used directly against Synapse's authenticated media API.
+  exchange is used directly against Synapse's authenticated media API. As of
+  2026-06-26 the gate also accepts that MAS token as an `Authorization: Bearer`
+  header from first-party clients, not only via the OIDC cookie session.
 - **Known bug worked around — issue #4415:** `client_name` for *static* clients
   is not synced to the DB, so the OAuth consent screen shows the raw client
   ULID. Worked around by the `mas-clientname-fix` sidecar (stock `postgres:16`

@@ -35,7 +35,13 @@ media-gating routes image requests through this gate, and authentication uses an
 OIDC Authorization Code + PKCE flow against matrix-authentication-service (MAS).
 The earlier Matrix password-grant login has been retired (the homeserver now
 delegates auth to MAS under MSC3861, which no longer accepts that grant). See
-DEVLOG.md §9 for the migration detail and the deferred roadmap.
+DEVLOG.md for the migration detail and the deferred roadmap.
+
+**2026-06-26 update:** the gate now also accepts an `Authorization: Bearer`
+MAS token (alongside the `fourier_session` cookie), so first-party clients
+(e.g. Technetium) use it directly. It is publicly reachable at
+`https://mxc.41chan.net` (route `GET /media/:serverName/:mediaId`, thumbnails
+via `?w=`). See DEVLOG.md §9.
 
 ---
 
@@ -61,6 +67,9 @@ DEVLOG.md §9 for the migration detail and the deferred roadmap.
 - OIDC_CLIENT_SECRET — the corresponding client secret.
 - OIDC_REDIRECT_URI — the callback, e.g. https://booru.41chan.net/fourier/callback.
 - POST_LOGIN_REDIRECT — where to send the user after a successful login.
+- CLIENT_ORIGINS — comma-separated browser origins allowed to call the media
+  proxy cross-origin with a Bearer token (CORS allow-list; e.g. a dev client
+  at http://127.0.0.1:5173). Empty/unset = no cross-origin clients.
 
 The OIDC client credentials are secrets: supply them via a gitignored `.env`
 (compose substitutes them in), not hardcoded in docker-compose.yaml.
