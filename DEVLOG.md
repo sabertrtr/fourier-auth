@@ -2,8 +2,16 @@
 
 **Project:** Fourier · **Component:** Auth (platform-gated media auth & token broker)
 **Location:** /opt/fourier/auth/
-**Status:** Core service built, containerized, and proven end to end (host and
-container-to-container). Danbooru integration not yet wired.
+**Status:** Live. Danbooru integration wired (media gate proven end to end), and
+authentication migrated from Matrix password-grant to OIDC/PKCE against MAS.
+
+> **IMPORTANT — sections 1–8 below describe the ORIGINAL password-grant design
+> and are partially SUPERSEDED.** The authentication model in particular
+> (§5 "Login: Matrix password grant", and the password-related parts of §2 and
+> §7's provider seam) was replaced on 2026-06-14. See the new section **"9.
+> OIDC migration (MAS / MSC3861)"** at the bottom for the current state. The
+> architecture, session model (§4), and security guarantees (§6) remain
+> accurate; only the login mechanism changed. Read §9 before acting on §5.
 
 ---
 
@@ -159,6 +167,121 @@ Health:
 - Session cookie: fourier_session (httpOnly)
 - Default ports: auth 8010 (dev), redis 6379 (loopback dev only)
 
+## 9. Bearer mode + public gateway — mxc.41chan.net (2026-06-26)
+
+Added a second way into the /media token broker so first-party clients (Technetium)
+use the gate without a fourier_session cookie, and exposed the gate publicly.
+
+Code (index.js):
+- /media/:serverName/:mediaId resolves the upstream Matrix token from EITHER
+  `Authorization: Bearer <MAS token>` (header wins) OR the fourier_session cookie.
+  Synapse stays the final authority (invalid token 401s through). Booru cookie
+  path unchanged — additive, backward-compatible.
+- CORS: new CLIENT_ORIGINS env (comma-separated allow-list); applyMediaCors()
+  reflects ACAO for listed origins + OPTIONS preflight. Header-based, so NO
+  Allow-Credentials (no cross-origin cookies).
+
+Compose / deploy:
+- ports ["127.0.0.1:8010:8010"] (loopback publish; matches every other service).
+- CLIENT_ORIGINS=http://127.0.0.1:5173 (Technetium dev).
+
+Ingress:
+- Caddy (HOST systemd process, not in the Docker stack):
+  mxc.41chan.net { reverse_proxy localhost:8010 }  — LE cert auto-provisioned.
+- Cloudflare DNS: mxc.41chan.net, proxied.
+
+Verified: unauth -> 401 {"error":"no valid session or bearer token"};
+valid Bearer -> 200 image/jpeg; ?w=320 snaps to ALLOWED_THUMB_SIZES.
+
+Note: public route is /media/:server/:id?w=<px>, distinct from the upstream
+Synapse paths (/_matrix/client/v1/media/{download,thumbnail}) the gate proxies to.
+
 ---
 
 Development log for the fourier-auth build.
+
+---
+
+## 9. OIDC migration (MAS / MSC3861) — 2026-06-14
+
+**Supersedes the password-grant auth described in §5 (and the password parts of
+§2 and §7).** The session model (§4), the gate architecture (§2's proxy
+behavior), and the security guarantees (§6) are unchanged and still accurate.
+
+### Why this changed
+
+The homeserver was migrated to delegate authentication to
+matrix-authentication-service (MAS) under MSC3861 (see the separate
+`MAS_DEVLOG.md` in /opt/synapse/). Once Synapse delegates auth, it no longer
+honors the legacy `m.login.password` grant that `MatrixProvider` relied on —
+fourier-auth's password login began returning 401 for valid credentials. This
+forced (and enabled) the move to a proper OIDC redirect flow, which had always
+been the intended end state: the original §5 explicitly flagged the
+password-in-transit model as a stopgap "to be replaced by an SSO/OIDC provider."
+That concern is now resolved — fourier-auth never sees a password.
+
+### What the provider seam bought us
+
+The provider abstraction (§7) paid off exactly as designed: the session and gate
+layers did not change at all. Only `providers.js` (new provider) and the
+`/login` + `/callback` routes in `index.js` changed.
+
+### New flow (Authorization Code + PKCE)
+
+1. `GET /fourier/login` → builds a MAS authorize URL with PKCE, stashes the
+   state + code_verifier in Redis (single-use, 10-min TTL), and redirects the
+   browser to MAS.
+2. User authenticates at MAS (`auth.41chan.net`) and consents.
+3. MAS redirects to `GET /fourier/callback?code=&state=`.
+4. fourier-auth validates state, exchanges the code at MAS's token endpoint
+   (with the code_verifier), and receives an access token.
+5. **The MAS access token is a valid Matrix token under MSC3861.** A
+   `whoami` call resolves the user id; a session is minted exactly as before;
+   the gate uses the token against Synapse's authenticated media API unchanged.
+
+### Code changes
+
+- `providers.js`: added `OidcProvider` — `discover()` (lazy
+  `.well-known/openid-configuration`), `authUrl()` (PKCE S256 challenge,
+  scope `openid urn:matrix:org.matrix.msc2967.client:api:*` — the scope is what
+  makes MAS issue a Matrix-API-capable token), and `exchange()` (code → token →
+  whoami). Hand-rolled with `axios` (no new dependency). `MatrixProvider`
+  retained but **non-functional under delegation** — slated for removal.
+- `index.js`: `/login` changed from `POST` (JSON) to `GET` (redirect); added
+  `GET /callback`. Session-minting and the media gate are byte-for-byte the same.
+- `session.js`: added `putOidcState`/`takeOidcState` (single-use Redis storage
+  for in-flight PKCE state) and a Redis `error` handler. The handler carries a
+  comment explaining the expected host-side `ECONNREFUSED` spam when the module
+  is load-tested on the host before containerization (Redis is internal to the
+  Docker network; not a fault — use `node --check` to load-test without
+  connecting).
+
+### Config / secrets
+
+- OIDC client credentials are supplied via environment, sourced from a
+  **gitignored `.env`** via compose substitution (`${OIDC_CLIENT_ID}`,
+  `${OIDC_CLIENT_SECRET}`) — NOT hardcoded in the tracked `docker-compose.yaml`.
+  Env vars: `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`,
+  `OIDC_REDIRECT_URI`, `POST_LOGIN_REDIRECT`.
+- The fourier-auth client is statically registered in `mas/config.yaml`
+  (id, secret, redirect `https://booru.41chan.net/fourier/callback`).
+
+### Gotchas encountered
+
+- **Stale build / mislaid file:** an early edit of `providers.js` was written to
+  the wrong working copy; the build faithfully shipped the old file and `/login`
+  threw "Cannot read properties of null (reading 'authUrl')" (provider not
+  registered). Verify edits landed on the file the build's `COPY` reads
+  (`realpath providers.js`), and confirm the running container has them
+  (`docker compose exec auth grep -c "oidc: OidcProvider" providers.js`).
+- **Consent-screen client name:** shows the raw client ULID, not "Fourier", due
+  to upstream MAS issue #4415 (static clients' `client_name` not synced).
+  Worked around by a sidecar in the Synapse stack — see `MAS_DEVLOG.md` §7.
+
+### Deferred (updated)
+
+- Remove `MatrixProvider` (dead under delegation).
+- Device cleanup on logout/expiry — now MAS-managed; confirm behavior.
+- The original §7 "deferred" list's items 1 (wire Danbooru's image URLs) is
+  DONE (the chanbooru fork's media-gating routes through this gate); item 3
+  (SSO/OIDC provider) is DONE (this section).

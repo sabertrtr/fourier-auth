@@ -19,6 +19,23 @@ const POST_LOGIN_REDIRECT = process.env.POST_LOGIN_REDIRECT || "https://booru.41
 // arbitrary-size thumbnail generation.
 const ALLOWED_THUMB_SIZES = [180, 320, 360, 720, 850];
 
+// Origins allowed to call the media proxy cross-origin with a Bearer token
+// (first-party SPA clients like Technetium). Comma-separated env; empty = none.
+const CLIENT_ORIGINS = (process.env.CLIENT_ORIGINS || "")
+  .split(",").map((s) => s.trim()).filter(Boolean);
+
+// Reflect CORS headers only for allow-listed origins. Bearer mode is header-
+// based (no cross-origin cookies), so we deliberately do NOT allow credentials.
+function applyMediaCors(req, res) {
+  const origin = req.headers.origin;
+  if (origin && CLIENT_ORIGINS.includes(origin)) {
+    res.set("Access-Control-Allow-Origin", origin);
+    res.set("Vary", "Origin");
+    res.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+    res.set("Access-Control-Allow-Headers", "Authorization");
+  }
+}
+
 // Health check (also verifies Redis connectivity)
 app.get("/healthz", async (req, res) => {
   let redisOk = false;
@@ -73,6 +90,14 @@ app.post("/logout", async (req, res) => {
   res.json({ ok: true });
 });
 
+// CORS preflight for the media proxy: a Bearer Authorization header makes the
+// cross-origin GET a non-simple request, so the browser sends OPTIONS first.
+app.options("/media/:serverName/:mediaId", (req, res) => {
+  applyMediaCors(req, res);
+  res.set("Access-Control-Max-Age", "600");
+  res.sendStatus(204);
+});
+
 // Media proxy: resolves the caller's session -> Matrix token, streams from Synapse.
 // Thumbnails: ?w=<px>&h=<px> (snapped to ALLOWED_THUMB_SIZES), or legacy ?thumb=1 (320).
 app.get("/media/:serverName/:mediaId", async (req, res) => {
@@ -87,11 +112,26 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
     thumbSize = 320;
   }
 
-  const session = await getSession(req.cookies[COOKIE_NAME]);
-  if (!session) {
-    return res.status(401).json({ error: "no valid session" });
+  applyMediaCors(req, res);
+
+  // Token broker, two ways in (Bearer header wins when present):
+  //   Authorization: Bearer <MAS token> -> first-party clients (Technetium)
+  //     that already hold the user's MAS token; header-based, so no cookie /
+  //     SameSite friction cross-origin.
+  //   fourier_session cookie             -> the booru's same-site path.
+  // Synapse remains the final authority on validity: an invalid token earns a
+  // 401 from the upstream media endpoint, which we pass straight through.
+  let token = null;
+  const authz = req.headers.authorization || "";
+  if (authz.startsWith("Bearer ")) {
+    token = authz.slice(7).trim();
+  } else {
+    const session = await getSession(req.cookies[COOKIE_NAME]);
+    if (session) token = session.matrixToken;
   }
-  const token = session.matrixToken;
+  if (!token) {
+    return res.status(401).json({ error: "no valid session or bearer token" });
+  }
 
   const base = `${SYNAPSE_URL}/_matrix/client/v1/media`;
   const url = thumbSize
