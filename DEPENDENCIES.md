@@ -8,7 +8,7 @@ that reason is recorded here so it is not lost or accidentally "upgraded" away.
 
 Update this file whenever a version choice changes or a new constrained dependency is added.
 
-Last verified: 2026-06-11.
+Last verified: 2026-06-14.
 
 ---
 
@@ -33,7 +33,15 @@ Last verified: 2026-06-11.
   | `form-data` | `^4.0.5` | Multipart upload of image bytes to Danbooru. No special constraint. |
 - **Full resolved tree:** see `package-lock.json` (authoritative; do not duplicate here).
 
-### fourier-auth (Matrix-gated media auth/token broker) — IN PROGRESS
+### fourier-auth (Matrix-gated media auth/token broker) — LIVE
+
+> **2026-06-14 update:** Containerized and live; Danbooru media-gating wired.
+> Authentication migrated from Matrix password-grant to OIDC/PKCE against MAS
+> (see the MAS entry below and `MAS_DEVLOG.md`). The Node-22 choice below still
+> holds — the OIDC work added no nedb-class constraint (hand-rolled with the
+> existing `axios`; no new dependency). OIDC client credentials are supplied via
+> a gitignored `.env` (compose substitution), not hardcoded in the tracked
+> compose file.
 
 - **Location:** `/opt/fourier/auth/` (planned)
 - **Runtime base image:** `node:22-slim` (current LTS).
@@ -68,6 +76,38 @@ Last verified: 2026-06-11.
   - Authenticated media endpoints in use: `/_matrix/client/v1/media/download/...` and
     `/_matrix/client/v1/media/thumbnail/...` (the latter confirmed working for fourier-auth's
     thumbnail-serving design — returns resized JPEG, auth-gated).
+
+### MAS — matrix-authentication-service (Synapse's delegated auth) — ADDED 2026-06-14
+
+- **Location:** runs as the `mas` service in `/opt/synapse/docker-compose.yaml`.
+- **Image:** `ghcr.io/element-hq/matrix-authentication-service:latest` —
+  currently **v1.18.0**. Consider pinning to a digest/tag (see risk register).
+- **Runtime user:** distroless, **uid 65532**. `mas/config.yaml` MUST be
+  `chown 65532` and 0600, or the container can't read it — and the failure
+  misreports as a database connection / password error (it can't read the config
+  holding the DB URI).
+- **Database:** dedicated role `mas` + database `mas` inside the existing
+  `synapse-postgres-1` instance (NOT a new Postgres). DB password must be
+  URI-safe (hex) — `@ / : #` break the `database.uri` parsing.
+- **Delegation contract (Synapse side):** `homeserver.yaml`
+  `experimental_features.msc3861` points at issuer `https://auth.41chan.net/`
+  and authenticates as client `0000000000000000000SYNAPSE`
+  (client_secret_basic). Synapse registration keys
+  (`registration_shared_secret`, `enable_registration*`) MUST be disabled when
+  delegating — MAS owns registration.
+- **Password schemes (deliberate):** two schemes — v1 `bcrypt` (required so
+  `syn2mas` can import Synapse's existing bcrypt hashes) + v2 `argon2id` (the
+  stronger target; MAS transparently re-hashes on next login). Do NOT drop
+  bcrypt until all active users have logged in post-migration.
+- **Token model:** a MAS-issued OAuth access token is also a valid Matrix token
+  (MSC3861). fourier-auth's OIDC client relies on this — the token from the code
+  exchange is used directly against Synapse's authenticated media API.
+- **Known bug worked around — issue #4415:** `client_name` for *static* clients
+  is not synced to the DB, so the OAuth consent screen shows the raw client
+  ULID. Worked around by the `mas-clientname-fix` sidecar (stock `postgres:16`
+  image) that re-applies the name after each MAS start, keyed on the client's
+  redirect URI. REMOVE the sidecar once #4415 is fixed upstream. See
+  `MAS_DEVLOG.md` §7.
 
 ### Postgres (Synapse's database)
 
@@ -117,14 +157,17 @@ reproducibility or stability becomes a concern, pin these to image digests:
 - `ghcr.io/danbooru/archives:latest`
 - `evazion/iqdb`
 - `softwaremill/elasticmq-native`
+- `ghcr.io/element-hq/matrix-authentication-service:latest` (MAS — currently
+  v1.18.0; pin once auth stability matters)
 
 ---
 
-## Verified versions snapshot (2026-06-11)
+## Verified versions snapshot (2026-06-14)
 
 | Component | Version |
 |-----------|---------|
 | Synapse | 1.152.1 |
+| MAS (matrix-authentication-service) | 1.18.0 |
 | Node (bmb container) | v20.20.2 |
 | Synapse Postgres | 16 (stock image) |
 | Danbooru Postgres | 16.1 (danbooru image) |

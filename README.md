@@ -30,15 +30,21 @@ is only a pointer; it grants no access without a valid, permitted Matrix token.
 
 ## Status
 
-Proven end to end on the host (login, sessions, gated media fetch, all denial paths). NOT
-yet containerized, and not yet integrated with a consuming application (e.g. Danbooru's
-image rendering). See DEVLOG.md for the full state and the deferred roadmap.
+Live. Containerized and integrated end to end: the chanbooru (Danbooru fork)
+media-gating routes image requests through this gate, and authentication uses an
+OIDC Authorization Code + PKCE flow against matrix-authentication-service (MAS).
+The earlier Matrix password-grant login has been retired (the homeserver now
+delegates auth to MAS under MSC3861, which no longer accepts that grant). See
+DEVLOG.md §9 for the migration detail and the deferred roadmap.
 
 ---
 
 ## Requirements
 
 - A working Synapse homeserver with enable_authenticated_media: true.
+- A matrix-authentication-service (MAS) instance acting as the OIDC provider,
+  with a client registered for this service (client id/secret + the redirect URI
+  below). See MAS_DEVLOG.md in the Synapse stack.
 - Redis (a dedicated, ephemeral instance is provided under redis/).
 - Node 22 (no nedb-class constraint; unlike fourier-bmb this is not pinned to Node 20).
 
@@ -50,19 +56,37 @@ image rendering). See DEVLOG.md for the full state and the deferred roadmap.
 - REDIS_URL — e.g. redis://fourier-redis:6379 (or redis://127.0.0.1:6379 for host dev).
 - PORT — listen port (default 8010).
 - SESSION_TTL — session lifetime in seconds (default 86400).
+- OIDC_ISSUER — MAS issuer URL (e.g. https://auth.41chan.net/).
+- OIDC_CLIENT_ID — this service's client id registered in MAS.
+- OIDC_CLIENT_SECRET — the corresponding client secret.
+- OIDC_REDIRECT_URI — the callback, e.g. https://booru.41chan.net/fourier/callback.
+- POST_LOGIN_REDIRECT — where to send the user after a successful login.
+
+The OIDC client credentials are secrets: supply them via a gitignored `.env`
+(compose substitutes them in), not hardcoded in docker-compose.yaml.
 
 ---
 
-## Running (host / development)
+## Running
 
-Start the dedicated Redis:
+In production this runs as a container in the Synapse compose stack (see
+docker-compose.yaml), with OIDC credentials supplied from a gitignored `.env`.
+
+For host/development, start the dedicated Redis:
 
     cd redis
     docker compose up -d
 
-Start the service:
+Then start the service with the required environment (OIDC vars included):
 
-    SYNAPSE_URL="http://127.0.0.1:8008" REDIS_URL="redis://127.0.0.1:6379" PORT=8010 node index.js
+    SYNAPSE_URL="http://127.0.0.1:8008" \
+    REDIS_URL="redis://127.0.0.1:6379" \
+    PORT=8010 \
+    OIDC_ISSUER="https://auth.41chan.net/" \
+    OIDC_CLIENT_ID="..." OIDC_CLIENT_SECRET="..." \
+    OIDC_REDIRECT_URI="https://booru.41chan.net/fourier/callback" \
+    POST_LOGIN_REDIRECT="https://booru.41chan.net/" \
+    node index.js
 
 Health check:
 
@@ -72,11 +96,14 @@ Health check:
 
 ## API
 
-- POST /login — body { provider?: "matrix", username, password }. Authenticates via the
-  named provider (default "matrix") and sets the session cookie.
+- GET /login — begins the OIDC flow; redirects the browser to MAS to
+  authenticate. (No credentials are posted to this service.)
+- GET /callback — the OIDC redirect target; exchanges the authorization code,
+  mints the session, sets the cookie, and redirects to POST_LOGIN_REDIRECT.
 - POST /logout — destroys the session and clears the cookie.
 - GET /media/<server>/<mediaId> — proxies the full image (auth required).
-- GET /media/<server>/<mediaId>?thumb=1 — proxies a thumbnail (auth required).
+- GET /media/<server>/<mediaId>?w=<px>&h=<px> — proxies a thumbnail at the
+  nearest allowed size (auth required). Legacy ?thumb=1 also accepted.
 - GET /healthz — service + Redis health.
 
 ---
@@ -84,14 +111,19 @@ Health check:
 ## Providers
 
 Login is structured behind a provider interface (providers.js). A provider authenticates a
-user and yields { matrixUserId, matrixToken }. Matrix (password grant) is the first and
-currently only provider. Additional providers (SSO/OIDC, other platforms) implement the same
-shape without changes to the session or gate layers.
+user and yields { matrixUserId, matrixToken }. The active provider is **OIDC**: an
+Authorization Code + PKCE flow against MAS. Because MAS issues tokens that are valid Matrix
+tokens (MSC3861), the gate uses the token from the OIDC exchange directly against Synapse's
+authenticated media API — no separate Matrix login is needed.
 
-The current Matrix provider uses a direct password grant, which means the user's Matrix
-password is submitted to fourier-auth (in transit, not stored). This is acceptable for
-trusted/admin users and is intended to be superseded by an SSO/OIDC provider before opening
-to general users.
+A legacy MatrixProvider (direct password grant) remains in the code but is non-functional
+now that the homeserver delegates auth to MAS, and is slated for removal. The provider seam
+means session and gate layers are unaffected by which provider is used — adding the OIDC
+provider required no changes to either.
+
+Because login is now a redirect to MAS, the user's password is entered only at MAS and is
+never seen by this service — resolving the password-in-transit limitation of the original
+design.
 
 ---
 
