@@ -285,3 +285,88 @@ layers did not change at all. Only `providers.js` (new provider) and the
 - The original §7 "deferred" list's items 1 (wire Danbooru's image URLs) is
   DONE (the chanbooru fork's media-gating routes through this gate); item 3
   (SSO/OIDC provider) is DONE (this section).
+
+---
+
+## 2026-06-28 — Per-room media authorization (the §9 leak, closed)
+
+### The vulnerability
+A logged-in user could fetch ANY media by mxc, regardless of room membership.
+Confirmed live: `@notsaber` (member of no content rooms) fetched a private
+room's image and got `200` + bytes, while `/messages` for that same room
+correctly `403`'d. The bytes rendered in a fresh browser. Real exposure.
+
+### Root cause — NOT a fourier-auth or client bug
+fourier-auth forwards the user's own token to Synapse's authenticated-media
+endpoint (`/_matrix/client/v1/media/download`) and trusts Synapse's verdict —
+correct delegation. The gap is in SYNAPSE: authenticated media (MSC3916)
+authenticates the *token* but does NOT enforce per-room membership. It killed
+anonymous media URLs; it did NOT add per-room ACLs (a deliberate spec scoping
+decision — per-room media authz across federation is hard, so it's left to the
+application layer). So any valid token fetches any mxc. This is a Synapse
+PROPERTY, by design.
+
+LESSON (record loudly): "authenticated media" != "authorized media." The
+intuition that Synapse would not serve restricted media to a non-member is
+WRONG. A future Synapse-upgrade session will have the same intuition — this
+note exists so they don't re-derive it.
+
+### The model (confirmed canonical)
+A user may fetch a piece of media IFF they are joined to >=1 Matrix room that
+contains it. Applies UNIFORMLY to clients (bearer) and the booru (cookie) — the
+booru grants no access room membership wouldn't. "Visible-if-visible-anywhere":
+if the same bytes are in any room you can see, you can fetch them (content
+identity is by mxc; aligns with booru MD5 dedup). This is just reality — if
+bytes are public anywhere, they're public.
+
+### The fix — `mediaauth.js` (Option A)
+New module gating GET /media before the upstream fetch:
+- `resolveMediaRooms(mxc)` -> which rooms contain this mxc. Read DIRECTLY from
+  Synapse Postgres: `events JOIN event_json ON event_id WHERE type='m.room.message'
+  AND json::jsonb #>> '{content,url}' = mxc`. Cached (mediarooms:<mxc>, 6h —
+  an mxc's room set is immutable once posted). Only non-empty results cached.
+- `getJoinedRooms(token)` -> `GET /joined_rooms` with the USER'S OWN token.
+  Token-scoped, no admin, no user_id needed (dropped whoami — the token IS the
+  identity). Cached (userrooms:<sha256(token)>, 5m).
+- Allow IFF (mxc's rooms) ∩ (user's joined rooms) != empty. Else 403.
+- FAIL CLOSED on any error or empty resolution.
+
+### Why DB-coupling (accepted deliberately)
+Matrix exposes NO media->room lookup in the client API (verified against spec).
+mxc is content-addressed, decoupled from rooms by design. So the mxc->room half
+unavoidably needs a privileged read. The caller's own token can't do it (a
+non-member can't read a room's events). Options were: build+maintain a parallel
+index (the §4.1 design), or read Synapse's DB (which IS that index, already
+populated). We read the DB.
+
+COUPLING NOTE (the reason this is documented): the resolver query depends on
+Synapse's schema (`events`/`event_json`, `json::jsonb #>> '{content,url}'`). A
+Synapse upgrade that changes that shape BREAKS the query — but LOUDLY (resolver
+error -> fail-closed -> media stops, very visible), not silently. When that
+happens, the fix is to re-check the schema, not to re-investigate the whole
+authz model. Swap for a built index (bmb-owned mxc->rooms) later if the coupling
+ever bites; `resolveMediaRooms()` is the single swappable seam.
+
+REJECTED earlier resolver sources, for the record:
+- `net.41chan.media.tags` state (bmb tags): covers ~11/283 media — bmb is only
+  in one unused room. NOT a viable resolver; would 403 ~96% of legit media.
+- Synapse admin API: no clean "rooms containing this mxc" endpoint exists.
+
+### Infra
+- Dedicated read-only role `fourier_auth_ro`: LOGIN NOSUPERUSER, `SELECT` on
+  `events`,`event_json` ONLY. Write attempts correctly denied. Password in
+  gitignored `.env` (Compose `${SYNAPSE_DB_PASSWORD}` substitution, matching the
+  OIDC secret pattern). Reaches Postgres over the shared `synapse_default`
+  network (no new network/port needed).
+- `pg` added to deps; `mediaauth.js` added to Dockerfile COPY; cache helpers
+  (`cacheGetJson`/`cacheSetJson`) added to session.js reusing its redis client.
+
+### Verified live (through mxc.41chan.net gateway)
+non-member -> 403 | member -> 200 | member thumbnail -> 200 | no token -> 401.
+The leak is closed; legit access intact; booru cookie path unchanged.
+
+### Avatars — NOT in scope (verified)
+Avatars do not traverse this gateway: Technetium resolves member avatars via
+`getMxcAvatarUrl()` (Synapse client API), only `m.image` MESSAGE events hit
+/media. So fail-closed gating doesn't break avatars. (Future idea: serve avatars
+locally on 41chan — public, tiny, fetched once — instead of via R2/gateway.)

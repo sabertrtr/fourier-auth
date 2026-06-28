@@ -68,6 +68,18 @@ async function redisPing() {
   return redis.ping();
 }
 
+// Generic short-lived JSON cache (used by the media-auth gate). Reuses the same
+// redis connection as sessions. get returns the parsed value or null; set stores
+// with a TTL in seconds.
+async function cacheGetJson(key) {
+  const raw = await redis.get(key);
+  return raw ? JSON.parse(raw) : null;
+}
+
+async function cacheSetJson(key, value, ttlSeconds) {
+  await redis.set(key, JSON.stringify(value), "EX", ttlSeconds);
+}
+
 // Short-lived storage for in-flight OIDC login state (PKCE verifier + CSRF
 // state), keyed by the random state value. Separate from sessions; 10-min TTL.
 const OIDC_PREFIX = "oidc:";
@@ -82,4 +94,4 @@ async function takeOidcState(state) {
   try { return JSON.parse(raw); } catch (e) { return null; }
 }
 
-module.exports = { createSession, getSession, destroySession, redisPing, putOidcState, takeOidcState };
+module.exports = { createSession, getSession, destroySession, redisPing, putOidcState, takeOidcState, cacheGetJson, cacheSetJson };

@@ -4,6 +4,7 @@ const cookieParser = require("cookie-parser");
 const { createSession, getSession, destroySession, redisPing,
         putOidcState, takeOidcState } = require("./session");
 const { getProvider } = require("./providers");
+const { checkMediaAccess } = require("./mediaauth");
 
 const app = express();
 app.use(cookieParser());
@@ -131,6 +132,15 @@ app.get("/media/:serverName/:mediaId", async (req, res) => {
   }
   if (!token) {
     return res.status(401).json({ error: "no valid session or bearer token" });
+  }
+
+  // Per-room authorization: Synapse authenticates the token but does NOT enforce
+  // that the user can see the room this mxc lives in (MSC3916 scoping). Enforce
+  // it here -- allow only if the token's owner is joined to a room containing
+  // this media. Fail closed. Applies to BOTH bearer (client) and cookie (booru).
+  const allowed = await checkMediaAccess(token, serverName, mediaId);
+  if (!allowed) {
+    return res.status(403).json({ error: "not authorized for this media" });
   }
 
   const base = `${SYNAPSE_URL}/_matrix/client/v1/media`;
